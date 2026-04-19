@@ -115,11 +115,14 @@ class CommandHandler:
         self.prefix = prefix
 
     def matches(self, body: str) -> bool:
-        b = body.strip()
-        return b == self.prefix or b.startswith(self.prefix + " ")
+        # use first non-empty line only (Element sends Shift+Enter as \n)
+        first = next((ln for ln in body.splitlines() if ln.strip()), "").strip()
+        return first == self.prefix or first.startswith(self.prefix + " ")
 
     async def dispatch(self, body: str, source_room: str | None = None) -> CommandResult:
-        parts = shlex.split(body.strip())
+        # take first non-empty line only
+        first_line = next((ln for ln in body.splitlines() if ln.strip()), "").strip()
+        parts = shlex.split(first_line)
         if not parts or parts[0] != self.prefix:
             return CommandResult("(not a mesh command)")
         args = parts[1:]

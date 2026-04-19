@@ -64,6 +64,12 @@ class MatrixBot:
     async def start(self) -> None:
         log.info("Matrix sync_forever starting as %s", self.user_id)
         self._ready.set()
+        # skip all events that are older than 'now' — we only want to react
+        # to messages that arrive after the bridge came up, never replay
+        # history on restart (otherwise commands like `!mesh send ...` would
+        # be executed again after every reboot).
+        import time
+        self._started_ts_ms = int(time.time() * 1000)
         await self.client.sync_forever(timeout=30000, full_state=False, loop_sleep_time=1000)
 
     async def close(self) -> None:
@@ -178,6 +184,11 @@ class MatrixBot:
 
     async def _on_message(self, room: MatrixRoom, event: RoomMessageText) -> None:
         if event.sender == self.user_id:
+            return
+        # Drop messages that were sent before the bridge started — prevents
+        # replaying commands (or mesh TX) on every restart.
+        started = getattr(self, "_started_ts_ms", 0)
+        if started and event.server_timestamp < started:
             return
         for cb in list(self._msg_cbs):
             try:
