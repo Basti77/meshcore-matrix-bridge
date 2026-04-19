@@ -291,6 +291,22 @@ class Bridge:
         self.node.on_dm(lambda p: self._deliver_rx("dm", p))
         self.node.on_channel(lambda p: self._deliver_rx("chan", p))
 
+        async def _on_status(status: str, detail: str) -> None:
+            rid = self.control_room()
+            if not rid:
+                return
+            if status == "offline":
+                body = f"🔴 MeshCore-Node OFFLINE ({detail})"
+            elif status == "online":
+                body = f"🟢 MeshCore-Node wieder ONLINE ({detail})"
+            else:
+                body = f"ℹ️ Node-Status: {status} ({detail})"
+            try:
+                await self.matrix.send(rid, body, notice=True)
+            except Exception:
+                self.log.exception("send status notice failed")
+        self.node.on_status(_on_status)
+
         self.log.info("Connecting to MeshCore on %s", self.cfg.meshcore_port)
         await self.node.connect()
         if self.cfg.auto_fetch_messages:

@@ -22,6 +22,7 @@ from meshcore import MeshCore, EventType  # type: ignore[import-not-found]
 log = logging.getLogger(__name__)
 
 RxCallback = Callable[[dict[str, Any]], Awaitable[None]]
+StatusCallback = Callable[[str, str], Awaitable[None]]  # (status, detail)
 
 
 class MeshNode:
@@ -51,7 +52,11 @@ class MeshNode:
         self.mc: Optional[MeshCore] = None
         self._dm_cbs: list[RxCallback] = []
         self._chan_cbs: list[RxCallback] = []
+        self._status_cbs: list[StatusCallback] = []
         self._ready = asyncio.Event()
+        self._hb_task: Optional[asyncio.Task] = None
+        self._last_seen_ts: float = 0.0
+        self._online: bool = False
 
     # ----- lifecycle ---------------------------------------------------
 
@@ -94,8 +99,19 @@ class MeshNode:
                 )
         self.mc.subscribe(EventType.CONTACT_MSG_RECV, self._on_dm)
         self.mc.subscribe(EventType.CHANNEL_MSG_RECV, self._on_chan)
+        try:
+            self.mc.subscribe(EventType.DISCONNECTED, self._on_disconnected)
+            self.mc.subscribe(EventType.CONNECTED, self._on_connected)
+        except Exception:
+            log.warning("CONNECTED/DISCONNECTED events not available in this meshcore lib")
+        import time as _t
+        self._last_seen_ts = _t.monotonic()
+        self._online = True
         self._ready.set()
         log.info("Connected to MeshCore node (%s)", self.transport)
+        # start heartbeat watcher
+        if self._hb_task is None or self._hb_task.done():
+            self._hb_task = asyncio.create_task(self._heartbeat_loop(), name="mesh-heartbeat")
 
     async def start_auto_fetch(self) -> None:
         assert self.mc is not None
@@ -109,6 +125,12 @@ class MeshNode:
                 pass
 
     async def disconnect(self) -> None:
+        if self._hb_task is not None and not self._hb_task.done():
+            self._hb_task.cancel()
+            try:
+                await self._hb_task
+            except Exception:
+                pass
         await self.stop_auto_fetch()
         if self.mc is not None:
             try:
@@ -116,6 +138,71 @@ class MeshNode:
             except Exception:
                 pass
         self._ready.clear()
+        self._online = False
+
+    # ----- heartbeat / status -----------------------------------------
+
+    def on_status(self, cb: StatusCallback) -> None:
+        self._status_cbs.append(cb)
+
+    async def _emit_status(self, status: str, detail: str = "") -> None:
+        for cb in list(self._status_cbs):
+            try:
+                await cb(status, detail)
+            except Exception:
+                log.exception("status callback failed")
+
+    async def _on_connected(self, event: Any) -> None:
+        import time as _t
+        self._last_seen_ts = _t.monotonic()
+        if not self._online:
+            self._online = True
+            await self._emit_status("online", "reconnected")
+
+    async def _on_disconnected(self, event: Any) -> None:
+        reason = ""
+        try:
+            reason = (event.payload or {}).get("reason", "") or ""
+        except Exception:
+            pass
+        if self._online:
+            self._online = False
+            await self._emit_status("offline", f"disconnected{': '+reason if reason else ''}")
+
+    async def _heartbeat_loop(self) -> None:
+        """Polls the node periodically; marks it offline if queries stop
+        succeeding. Catches silent hangs the meshcore lib does not signal."""
+        import time as _t
+        # grace period at startup
+        await asyncio.sleep(20)
+        interval = 60.0   # how often we probe
+        stale_after = 180 # seconds without successful probe = offline
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                if self.mc is None:
+                    continue
+                try:
+                    r = await asyncio.wait_for(self.mc.commands.get_bat(), timeout=8.0)
+                    ok = getattr(r, "type", None) != EventType.ERROR
+                except Exception:
+                    ok = False
+                now = _t.monotonic()
+                if ok:
+                    self._last_seen_ts = now
+                    if not self._online:
+                        self._online = True
+                        await self._emit_status("online", "probe recovered")
+                else:
+                    if self._online and (now - self._last_seen_ts) > stale_after:
+                        self._online = False
+                        await self._emit_status(
+                            "offline", f"no response from node for {int(now - self._last_seen_ts)}s"
+                        )
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                log.exception("heartbeat loop error")
 
     # ----- subscriptions -----------------------------------------------
 
