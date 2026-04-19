@@ -17,6 +17,8 @@ from nio import (  # type: ignore[import-not-found]
     LoginResponse,
     RoomMessageText,
     MatrixRoom,
+    RoomPreset,
+    RoomVisibility,
 )
 
 
@@ -83,7 +85,7 @@ class MatrixBot:
             topic="MeshCore ↔ Matrix bridge control room",
             invite=[invitee],
             is_direct=True,
-            preset="trusted_private_chat",
+            preset=RoomPreset.trusted_private_chat,
         )
         return resp.room_id  # type: ignore[attr-defined]
 
@@ -131,8 +133,8 @@ class MatrixBot:
         kwargs: dict[str, Any] = dict(
             name=name,
             topic=topic,
-            preset="public_chat",
-            visibility="public",  # listed in room directory
+            preset=RoomPreset.public_chat,
+            visibility=RoomVisibility.public,
             power_level_override=power_override,
             initial_state=initial_state,
         )
