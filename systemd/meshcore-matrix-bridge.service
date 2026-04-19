@@ -1,0 +1,16 @@
+[Unit]
+Description=MeshCore ↔ Matrix bridge
+Documentation=https://github.com/Basti77/meshcore-matrix-bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Both files are read by the bridge (first-wins semantics). Keep secrets 0600.
+Environment=MESH_BRIDGE_ENV_FILES=%h/.meshcore-bridge-secrets/matrix.env:%h/.meshcore-bridge-secrets/bridge.env
+ExecStart=%h/.local/bin/meshcore-matrix-bridge
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target

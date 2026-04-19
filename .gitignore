@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.env
+*.env
+!*.env.example
+.ruff_cache/
+.mypy_cache/
+state.json
+/home/klempi/.local/
+.vscode/
