@@ -159,8 +159,13 @@ mc-cli --transport ble --port scan --ble-name MeshCore status
 
 ## Creating the Matrix bot user
 
-On the homeserver (example: Synapse in Docker). Pick any password, a strong
-random one is fine.
+There are two common situations: you run your own homeserver (more control,
+the path used during development), or you use an existing / third-party
+homeserver (matrix.org, Element Home, a server your friend runs, ...).
+
+### Option A — your own Synapse
+
+Example with Synapse in Docker. Pick any password, a strong random one is fine.
 
 ```bash
 docker exec matrix-synapse register_new_matrix_user \
@@ -168,7 +173,38 @@ docker exec matrix-synapse register_new_matrix_user \
     -u meshcore -p '<password>' --no-admin http://localhost:8008
 ```
 
-Then obtain an access token:
+If the interactive prompt is awkward, Synapse also accepts a shared-secret
+registration over HTTP (`/\_synapse/admin/v1/register`) — handy when
+scripting the setup.
+
+### Option B — a homeserver you don't own (matrix.org, Element Home, ...)
+
+The bridge does not need any admin rights on the homeserver, **but** it does
+assume the bot account can
+
+1. log in over the client-server API,
+2. create rooms,
+3. accept invites,
+4. set custom power levels on rooms it owns.
+
+All of that is normal user territory on most open homeservers. Steps:
+
+1. **Register the bot account manually** through the server's usual signup
+   path (Element web, a `/register` endpoint that accepts open registration,
+   etc.). On `matrix.org` this is a normal signup with a CAPTCHA.
+2. **Get an access token** — easiest path: log into Element Web as the
+   bot, go to *Settings → Help & About → Access Token*, copy. Or use the
+   raw login API as shown below.
+3. **Pin a room, optionally** — some homeservers (notably `matrix.org`)
+   throttle or block new accounts from creating public rooms. In that case
+   set `MATRIX_ROOM_ID=!xxx:your-server` in `bridge.env` to skip the
+   auto-create step and use a pre-existing control room where you invited
+   the bot.
+4. Everything else (`!mesh bind`, `!mesh relay`, ...) works the same.
+
+### Getting a token via the login API
+
+Works against any homeserver:
 
 ```bash
 curl -s -X POST https://matrix.example.com/_matrix/client/v3/login \
@@ -179,7 +215,35 @@ curl -s -X POST https://matrix.example.com/_matrix/client/v3/login \
        "initial_device_display_name":"meshcore-bridge"}' | jq
 ```
 
-Copy `access_token` and `device_id` into `bridge.env` (see below).
+Copy `access_token` and `device_id` into `bridge.env`.
+
+### Gotchas on shared / third-party homeservers
+
+- **Room creation policies.** Some servers forbid fresh accounts from
+  creating public rooms (anti-spam). If `!mesh bind` fails with an HTTP
+  403, create the channel room manually in Element, make the bot an admin
+  (PL 100), and tell the bridge the room ID via `MATRIX_ROOM_ID=...` for
+  the control room, or via a future config option for channel rooms.
+- **Rate limits.** Large contact lists or bulk `fetch` commands can trip
+  per-user rate limits on big homeservers. There is no workaround from the
+  client side — just expect occasional `M_LIMIT_EXCEEDED` errors and let
+  the bridge back off and retry. On your own server you can whitelist the
+  bot's MXID in the `ratelimit_override` table (Postgres) + restart
+  Synapse.
+- **Federation.** Even if the bot lives on your own homeserver, people on
+  other homeservers can join the `#mesh-*` rooms as long as federation is
+  enabled on both sides. That is the "amateur radio on the internet"
+  effect: one node, a global audience, no account on your server needed.
+  Some homeservers disable federation by default — then only local users
+  can read.
+- **Room directory listing.** `visibility: public` makes the room appear
+  in the `/publicRooms` directory of the homeserver. Some admins disable
+  public listings; rooms remain joinable by direct URL / alias in that
+  case.
+- **End-to-end encryption.** The bridge explicitly runs unencrypted (no
+  E2EE). Public channel rooms shouldn't need it anyway — the whole point
+  is that anyone can read along. The control DM is not encrypted either,
+  so don't use it for secrets.
 
 ---
 
