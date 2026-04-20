@@ -78,7 +78,7 @@ def _fmt_ts(ts: Any) -> str:
         dt = datetime.fromtimestamp(int(ts), tz=timezone.utc)
     except (TypeError, ValueError, OSError, OverflowError):
         return f"ts={ts}"
-    return f"ts={dt.strftime('%Y-%m-%d %H:%M:%S')} UTC"
+    return f"ts={dt.strftime('%H:%M:%S')} UTC"
 
 
 def _fmt_contact(c: dict[str, Any]) -> tuple[str, str]:
