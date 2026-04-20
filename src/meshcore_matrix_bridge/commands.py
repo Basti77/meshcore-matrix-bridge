@@ -76,16 +76,17 @@ def fmt_msg(kind: str, payload: dict[str, Any], node: MeshNode) -> tuple[str, st
     text = payload.get("text", "")
     ts = payload.get("sender_timestamp")
     snr = payload.get("SNR")
+    ts_str = f"ts={ts} UTC" if ts is not None else "ts=?"
     if kind == "dm":
         pk = payload.get("pubkey_prefix", "")[:12]
         contact = None
         if node.mc is not None:
             contact = node.mc.get_contact_by_key_prefix(pk)
         sender = (contact or {}).get("adv_name") or pk
-        plain = f"[DM {sender}] {text}  (snr={snr}, ts={ts})"
+        plain = f"[DM {sender}] {text}  (snr={snr}, {ts_str})"
         html = (
             f"📩 <b>DM</b> from <b>{_escape(sender)}</b> <code>{pk}</code><br/>"
-            f"{_escape(text)}<br/><small>snr={snr} ts={ts}</small>"
+            f"{_escape(text)}<br/><small>snr={snr} {ts_str}</small>"
         )
         return plain, html
     # channel
@@ -100,8 +101,8 @@ def fmt_msg(kind: str, payload: dict[str, Any], node: MeshNode) -> tuple[str, st
         sender = (contact or {}).get("adv_name") or pk
         prefix_plain = f"<{sender}> "
         prefix_html = f"<b>&lt;{_escape(sender)}&gt;</b> "
-    plain = f"[CH#{idx}] {prefix_plain}{text}  (snr={snr}, ts={ts})"
-    html = f"📡 <b>#{idx}</b> {prefix_html}{_escape(text)}<br/><small>snr={snr} ts={ts}</small>"
+    plain = f"[CH#{idx}] {prefix_plain}{text}  (snr={snr}, {ts_str})"
+    html = f"📡 <b>#{idx}</b> {prefix_html}{_escape(text)}<br/><small>snr={snr} {ts_str}</small>"
     return plain, html
 
 
