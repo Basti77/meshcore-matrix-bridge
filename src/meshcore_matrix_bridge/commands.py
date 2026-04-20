@@ -1,6 +1,8 @@
 """Command parser for !mesh <subcommand> invocations from Matrix control room."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import html as html_mod
 import logging
 import shlex
@@ -63,6 +65,22 @@ def _escape(s: str) -> str:
     return html_mod.escape(s, quote=False)
 
 
+def _fmt_ts(ts: Any) -> str:
+    """Format a meshcore sender_timestamp (unix epoch, UTC) as ISO datetime.
+
+    Meshcore radio packets carry the sender's clock as a raw UTC epoch int —
+    that's the radio standard, keep it that way upstream, but render it
+    readable for humans in the Matrix bridge output.
+    """
+    if ts is None:
+        return "ts=?"
+    try:
+        dt = datetime.fromtimestamp(int(ts), tz=timezone.utc)
+    except (TypeError, ValueError, OSError, OverflowError):
+        return f"ts={ts}"
+    return f"ts={dt.strftime('%Y-%m-%d %H:%M:%S')} UTC"
+
+
 def _fmt_contact(c: dict[str, Any]) -> tuple[str, str]:
     name = c.get("adv_name") or "(unnamed)"
     pk = (c.get("public_key") or "")[:12]
@@ -76,7 +94,7 @@ def fmt_msg(kind: str, payload: dict[str, Any], node: MeshNode) -> tuple[str, st
     text = payload.get("text", "")
     ts = payload.get("sender_timestamp")
     snr = payload.get("SNR")
-    ts_str = f"ts={ts} UTC" if ts is not None else "ts=?"
+    ts_str = _fmt_ts(ts)
     if kind == "dm":
         pk = payload.get("pubkey_prefix", "")[:12]
         contact = None
