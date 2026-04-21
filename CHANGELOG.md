@@ -3,6 +3,22 @@
 All notable changes are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.0] — 2026-04-21
+
+### Added
+- Dropped channel messages are now persisted to an append-only JSONL
+  file at `~/.local/state/meshcore-matrix-bridge/rx-drops.jsonl`. On
+  bridge restart the drop log is replayed to rebuild the `!mesh queue`
+  counters and the per-channel 20-sample ringbuffer, so dropped
+  messages survive service restarts and crashes. Rotation kicks in at
+  2 MB (one generation kept, `.1` suffix), giving roughly 4 MB of
+  history on disk. IO is zero when no channels drop.
+
+### Changed
+- `!mesh queue` counters now separate `seen` (in-memory, current
+  process lifetime) from `dropped` (persistent since the log was
+  first written).
+
 ## [0.3.0] — 2026-04-21
 
 ### Added

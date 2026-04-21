@@ -325,7 +325,7 @@ class CommandHandler:
                         f"<br/>last {len(samples)} dropped sample(s):<ul>",
                     ]
                     for s in samples:
-                        ts = _fmt_ts(s.get("ts"))
+                        ts = _fmt_ts(s.get("sender_ts") or s.get("ts"))
                         hops = _fmt_hops(s.get("path_len"))
                         snr = s.get("snr")
                         text = s.get("text") or ""

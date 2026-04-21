@@ -368,8 +368,15 @@ explicitly:
 !mesh queue 7              # last ~20 dropped messages on slot 7 (text + SNR + hops)
 ```
 
-The bookkeeping lives for the lifetime of the bridge process and resets
-on restart — it is a runtime signal, not a history.
+The bookkeeping has two tiers:
+
+- **`seen` counters** live in memory for the current bridge process
+  (reset on restart — relayed messages are already in Matrix).
+- **`dropped` counters and samples** are persisted to an append-only
+  JSONL log at `~/.local/state/meshcore-matrix-bridge/rx-drops.jsonl`.
+  On restart the log is replayed so dropped messages and their counters
+  survive service restarts. Rotation at 2 MB, one generation kept. IO
+  is zero when nothing is dropping.
 
 ### Inbound message format
 
