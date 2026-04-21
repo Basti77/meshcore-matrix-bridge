@@ -8,10 +8,122 @@ The bridge is controlled from Matrix with a single command prefix (`!mesh …`)
 and can also be driven purely from the terminal (`mc-cli`) for quick send /
 receive tests without Matrix.
 
-> **Status:** `0.1.0` — first working release. Channel history has to be pulled
-> manually (via `!mesh fetch` or `!mesh public`) because the MeshCore companion
-> firmware itself does not keep a long-term channel history — it only exposes a
-> pending-messages queue that must be drained by the host.
+> **Status:** `0.4.0`. The bridge is in daily use on a private home
+> server. Channel history has to be pulled manually (via `!mesh fetch`
+> or `!mesh public`) because the MeshCore companion firmware itself
+> does not keep a long-term channel history — it only exposes a
+> pending-messages queue that must be drained by the host. Silently
+> dropped channel messages are persisted to a local JSONL log so that
+> `!mesh queue` can tell you what you missed even across restarts.
+
+---
+
+## ⚠️ Zielgruppe / Audience
+
+This project is **not a click-and-go appliance**. You need to be
+comfortable with: a Linux server that you administer yourself, systemd
+user services, editing `.env` files, `journalctl`, and the basics of
+your Matrix homeserver (how to create a user, how to get an access
+token). If any of that sounds exhausting, come back after you have a
+Matrix server running and a MeshCore Companion node that talks to your
+phone.
+
+In short: this is an amateur-radio-style home-brew bridge for people
+who already run their own Matrix server. There is currently **no
+install script** — the steps below have to be done by hand. If someone
+shows up and wants to help turn this into a one-liner installer, that
+would be very welcome; open an issue.
+
+---
+
+## 🇩🇪 Schnellüberblick auf Deutsch
+
+**Kein Projekt für Einsteiger.** Du solltest mit Linux-Server-Administration
+(systemd, `.env`, `journalctl`) und deinem Matrix-Homeserver (Benutzer
+anlegen, Access-Token holen) vertraut sein. Wenn dir schon einer dieser
+Begriffe unheimlich ist, richte erst deinen Matrix-Server ein und
+besorge dir einen MeshCore-Companion-Node, der mit deinem Handy spricht
+— komm dann wieder.
+
+Was dabei entsteht: Ein Matrix-Bot (`@meshcore:dein.server`), der auf
+deinem Homeserver läuft, per USB oder BLE mit deinem MeshCore-Node
+spricht und LoRa-Nachrichten in Matrix-Räume spiegelt (und zurück).
+Das ist quasi „Amateurfunk-Style auf Matrix": jeder darf mitlesen, nur
+zugelassene MXIDs dürfen senden.
+
+### Was du brauchst
+
+- Einen **eigenen Matrix-Homeserver** (Synapse, Conduit, Dendrite —
+  egal, Hauptsache du kannst dort einen Nutzer anlegen und einen
+  Access-Token holen). Wenn du nur auf matrix.org o.ä. einen Account
+  hast: geht technisch auch, ist aber wegen Rate-Limits und
+  Room-Creation-Restrictions mühsam. Eigener Server ist klar empfohlen.
+- Einen **MeshCore-Node mit Companion-Firmware** (Heltec V3, RAK4631,
+  T-Beam, …), angeschlossen entweder per USB an deinen Server oder
+  per BLE in Reichweite des Servers.
+- Einen **Linux-Host** auf dem die Bridge läuft (idealerweise derselbe
+  Host wie der Matrix-Server; spart Netzwerklatenz). Python ≥ 3.10,
+  `systemd --user`, kein Docker nötig.
+
+### Reihenfolge, die wir erfolgreich gegangen sind
+
+1. **Matrix-Server läuft, du hast einen regulären Matrix-Account**
+   (`@du:dein.server`) und kannst dich mit Element o.ä. einloggen.
+2. **Bot-Account anlegen** (`@meshcore:dein.server`) — bei Synapse über
+   `register_new_matrix_user` im Container. Kein Admin-Recht nötig.
+3. **Access-Token + Device-ID holen** über die `/login`-API (Beispiel
+   weiter unten im Abschnitt *Creating the Matrix bot user*).
+4. **MeshCore-Node verkabeln/koppeln** — entweder USB-CDC (`/dev/ttyUSB0`
+   bzw. `/dev/ttyACM0`) oder BLE (einmalig die BT-Adresse scannen). Das
+   **Handy muss den Node in dem Moment nicht gekoppelt haben** — der
+   Node akzeptiert nur **einen** BLE-Central gleichzeitig.
+5. **Bridge klonen, Venv anlegen, `pip install .`** (siehe
+   *Installation* unten).
+6. **`bridge.env` ausfüllen** unter `~/.meshcore-bridge-secrets/` mit
+   Homeserver-URL, Bot-MXID, Access-Token, Device-ID, Allowlist (deine
+   eigene MXID), dem MeshCore-Transport und -Port.
+7. **Einmal im Vordergrund starten** (`meshcore-matrix-bridge`) und in
+   Element die DM annehmen, die der Bot dir schickt. Er postet dort
+   `🟢 online`.
+8. **Die eigenen MeshCore-Channels auf dem Node anlegen** — entweder
+   vorher per App, oder aus der Matrix-DM heraus:
+   `!mesh addchan de-nw-owl`, `!mesh addchan europe`, …. Der Key wird
+   aus `sha256(name)[:16]` abgeleitet (regionale Konvention, z. B.
+   deutsche OWL-Community: `de`, `de-nw`, `de-nw-owl`, `de-west`,
+   `europe`).
+9. **Pro Channel einen Matrix-Raum binden und Relay anschalten:**
+   `!mesh bind 0 mesh-de`, `!mesh relay 0 on`. Dann dem neu erzeugten
+   Raum in Element beitreten — ab da kommen Funk-Nachrichten live in
+   den Raum und was du dort tippst geht raus.
+10. **Als systemd-User-Service einrichten** damit die Bridge reboots
+    überlebt (siehe *systemd (user scope)* unten). `loginctl
+    enable-linger` nicht vergessen.
+11. **Sanity-Checks:** `!mesh status` (Node-Info), `!mesh channels`
+    (Slot/Raum-Zuordnung), `!mesh queue` (was wurde empfangen / was
+    fiel wo hin).
+
+### Bots daraufsetzen
+
+Der Bridge-Code ist absichtlich **schmal** — alles was „Bot-haftes"
+macht (Wetter-Ticker, Mention-Responder, LLM-Relay, Cron-Ansagen)
+lebt als **separater Prozess** in einem eigenen Repo:
+[`Basti77/meshcore-bots`](https://github.com/Basti77/meshcore-bots).
+Ein Bot braucht nichts weiter als einen eigenen Matrix-Account, der
+in den gewünschten Channel-Raum eingeladen wird. Er postet dort ganz
+normal Nachrichten — die Bridge fängt die automatisch ab und sendet
+sie aufs LoRa-Netz. Umgekehrt kommen eingehende Mesh-Nachrichten
+wieder im selben Raum an und sind damit für den Bot lesbar.
+
+Ergebnis: **Jeder Matrix-Bot, den du ohnehin schon hast (n8n, Python,
+Home Assistant, Shell-Skript mit `curl`), wird dadurch ohne weitere
+Integration mesh-fähig.** Einladen, Power-Level 50 geben, fertig.
+
+### Es gibt aktuell kein Install-Skript
+
+Bewusste Entscheidung — die Zielgruppe ist klein genug, dass ein
+Skript mehr Mythos als Nutzen wäre. Wenn sich jemand ernsthaft
+dransetzen will: gerne Issue aufmachen oder per Matrix melden, dann
+bauen wir das gemeinsam.
 
 ---
 
