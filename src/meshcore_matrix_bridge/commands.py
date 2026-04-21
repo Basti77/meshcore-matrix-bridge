@@ -47,6 +47,12 @@ Channels / rooms
                                      is omitted.
   {prefix} delchan <idx>           — clear slot <idx> on the node and
                                      forget its Matrix binding.
+  {prefix} queue [idx]             — show in-process RX bookkeeping
+                                     (messages seen vs. silently dropped
+                                     because relay was off / no binding /
+                                     send failed). Optional <idx> shows
+                                     the last ~20 dropped samples for
+                                     one channel including text + SNR.
   {prefix} fetch [idx]             — drain the node's pending-message queue.
                                      Without <idx>, drops everything into the
                                      bound rooms (DMs stay in control room).
@@ -287,6 +293,91 @@ class CommandHandler:
                 unbound = self.bridge.unbind_channel(idx)
                 suffix = " (Matrix binding also forgotten)" if unbound else ""
                 return CommandResult(f"✓ cleared node slot #{idx}{suffix}")
+
+            if cmd == "queue":
+                snap = self.bridge.rx_snapshot()
+                chans = snap["channels"]
+                dm = snap["dm"]
+                dm_samples = snap["dm_samples"]
+
+                # detail view for a specific channel
+                if rest and rest[0].lstrip("-").isdigit():
+                    idx = int(rest[0])
+                    info = chans.get(idx)
+                    if not info:
+                        return CommandResult(
+                            f"no RX stats for #{idx} yet "
+                            "(nothing received on that channel since the bridge started)"
+                        )
+                    samples = info.get("samples") or []
+                    plain_lines = [
+                        f"RX stats #{idx} ({info.get('name') or '?'}):",
+                        f"  seen={info['seen']}  dropped={info['dropped']}  "
+                        f"relay={'on' if info['relay'] else 'off'}  "
+                        f"room={info.get('room_id') or '(unbound)'}",
+                        f"  last {len(samples)} dropped sample(s):",
+                    ]
+                    html_lines = [
+                        f"<b>RX stats #{idx}</b> ({_escape(info.get('name') or '?')})<br/>",
+                        f"seen=<b>{info['seen']}</b> dropped=<b>{info['dropped']}</b> ",
+                        f"relay={'on' if info['relay'] else 'off'} ",
+                        f"room=<code>{_escape(info.get('room_id') or '(unbound)')}</code>",
+                        f"<br/>last {len(samples)} dropped sample(s):<ul>",
+                    ]
+                    for s in samples:
+                        ts = _fmt_ts(s.get("ts"))
+                        hops = _fmt_hops(s.get("path_len"))
+                        snr = s.get("snr")
+                        text = s.get("text") or ""
+                        reason = s.get("reason", "?")
+                        plain_lines.append(
+                            f"    [{reason}] {text}  ({hops}, snr={snr}, {ts})"
+                        )
+                        html_lines.append(
+                            f"<li>[{_escape(reason)}] {_escape(text)} "
+                            f"<small>{hops} snr={snr} {ts}</small></li>"
+                        )
+                    if not samples:
+                        plain_lines.append("    (none)")
+                        html_lines.append("<li><i>(none)</i></li>")
+                    html_lines.append("</ul>")
+                    return CommandResult("\n".join(plain_lines), "".join(html_lines))
+
+                # summary view
+                if not chans and dm["seen"] == 0:
+                    return CommandResult(
+                        "RX bookkeeping is empty — nothing received on any channel "
+                        "since the bridge started."
+                    )
+                plain_lines = ["RX bookkeeping (since bridge start):"]
+                html_items = []
+                for idx in sorted(chans):
+                    info = chans[idx]
+                    flag = "⚠ " if info["dropped"] else "   "
+                    plain_lines.append(
+                        f"  {flag}#{idx:<2} {info.get('name') or '?':<16} "
+                        f"seen={info['seen']:<4} dropped={info['dropped']:<4} "
+                        f"relay={'on' if info['relay'] else 'off'}"
+                    )
+                    html_items.append(
+                        f"<li>{flag}<b>#{idx}</b> {_escape(info.get('name') or '?')} "
+                        f"seen=<b>{info['seen']}</b> dropped=<b>{info['dropped']}</b> "
+                        f"relay={'on' if info['relay'] else 'off'}</li>"
+                    )
+                plain_lines.append(
+                    f"  DM seen={dm['seen']} dropped={dm['dropped']}"
+                )
+                html_items.append(
+                    f"<li>DM seen=<b>{dm['seen']}</b> dropped=<b>{dm['dropped']}</b></li>"
+                )
+                if any(c["dropped"] for c in chans.values()) or dm["dropped"]:
+                    plain_lines.append(
+                        "  → use `!mesh queue <idx>` to see dropped samples for a channel."
+                    )
+                return CommandResult(
+                    "\n".join(plain_lines),
+                    f"<b>RX bookkeeping (since bridge start)</b><ul>{''.join(html_items)}</ul>",
+                )
 
             if cmd == "fetch":
                 only_idx: int | None = None

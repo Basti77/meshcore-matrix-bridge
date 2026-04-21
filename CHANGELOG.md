@@ -3,6 +3,19 @@
 All notable changes are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.3.0] — 2026-04-21
+
+### Added
+- `!mesh queue [idx]` — in-process RX bookkeeping. For every channel
+  the bridge tracks how many messages have been seen and how many were
+  silently dropped (relay off, no binding, or send failure), plus a
+  20-sample ringbuffer of the last dropped messages for each channel.
+  Without arguments you get a per-channel summary; with an index you
+  get the dropped sample texts (including SNR / hops / timestamp).
+  Makes it easy to spot channels that are active on the mesh but never
+  make it into Matrix because the relay is off or the room was never
+  bound/joined.
+
 ## [0.2.0] — 2026-04-21
 
 ### Added

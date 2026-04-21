@@ -31,6 +31,8 @@ from .meshnode import MeshNode
 from .state import State
 from .textsplit import split_for_radio
 
+from collections import deque
+
 
 _ALIAS_RE = re.compile(r"[^a-z0-9_\-]+")
 
@@ -69,6 +71,13 @@ class Bridge:
             cfg.matrix_allowed_users,
         )
         self.handler = CommandHandler(self.node, self, prefix=cfg.command_prefix)
+        # RX bookkeeping — per channel idx: counters + ringbuffer of the
+        # last messages we dropped silently (relay off / no binding / send
+        # error). Survives only for the lifetime of this bridge process.
+        self._rx_stats: dict[int, dict[str, int]] = {}
+        self._rx_dropped: dict[int, deque] = {}
+        self._dm_stats: dict[str, int] = {"seen": 0, "dropped": 0}
+        self._dm_dropped: deque = deque(maxlen=20)
 
     # ===== persistent state accessors ================================
 
@@ -228,11 +237,56 @@ class Bridge:
 
     # ===== incoming (mesh → matrix) ==================================
 
+    def _record_dropped(self, idx: int | None, reason: str, payload: dict[str, Any]) -> None:
+        """Remember a channel message we did not forward, so the user can
+        later query ``!mesh queue`` and see what was silently dropped."""
+        if idx is None:
+            return
+        st = self._rx_stats.setdefault(int(idx), {"seen": 0, "dropped": 0})
+        st["seen"] += 1
+        st["dropped"] += 1
+        buf = self._rx_dropped.setdefault(int(idx), deque(maxlen=20))
+        buf.append({
+            "reason": reason,
+            "text": payload.get("text", ""),
+            "ts": payload.get("sender_timestamp"),
+            "snr": payload.get("SNR"),
+            "path_len": payload.get("path_len"),
+            "pubkey_prefix": payload.get("pubkey_prefix", "")[:12],
+        })
+
+    def _record_forwarded(self, idx: int | None) -> None:
+        if idx is None:
+            return
+        st = self._rx_stats.setdefault(int(idx), {"seen": 0, "dropped": 0})
+        st["seen"] += 1
+
+    def rx_snapshot(self) -> dict[str, Any]:
+        """Return a copy of the current RX bookkeeping for !mesh queue."""
+        chans = {}
+        bindings = self.get_channel_bindings()
+        for idx, st in sorted(self._rx_stats.items()):
+            b = bindings.get(str(idx), {})
+            chans[idx] = {
+                "seen": st.get("seen", 0),
+                "dropped": st.get("dropped", 0),
+                "name": b.get("name"),
+                "room_id": b.get("room_id"),
+                "relay": b.get("relay", False),
+                "samples": list(self._rx_dropped.get(idx, [])),
+            }
+        return {
+            "channels": chans,
+            "dm": dict(self._dm_stats),
+            "dm_samples": list(self._dm_dropped),
+        }
+
     async def _deliver_rx(self, kind: str, payload: dict[str, Any], force: bool = False) -> None:
         plain, html = fmt_msg(kind, payload, self.node)
         target: str | None
         if kind == "dm":
             target = self.control_room()
+            self._dm_stats["seen"] += 1
         else:
             idx = payload.get("channel_idx")
             target = self._channel_room(int(idx)) if idx is not None else None
@@ -240,8 +294,12 @@ class Bridge:
                 bindings = self.get_channel_bindings()
                 b = bindings.get(str(idx), {})
                 if not b.get("relay", False):
-                    # just log, don't forward — user can !mesh fetch later
                     self.log.info("RX #%s (relay off): %s", idx, payload.get("text", ""))
+                    self._record_dropped(
+                        idx,
+                        "unbound" if not b else "relay-off",
+                        payload,
+                    )
                     return
             if target is None:
                 # no room bound → fall back to control room
@@ -249,8 +307,24 @@ class Bridge:
         if target:
             try:
                 await self.matrix.send_html(target, plain, html)
+                if kind == "dm":
+                    pass  # dm stats already updated above
+                else:
+                    self._record_forwarded(payload.get("channel_idx"))
             except Exception:
                 self.log.exception("send to %s failed", target)
+                if kind == "dm":
+                    self._dm_stats["dropped"] += 1
+                    self._dm_dropped.append({
+                        "reason": "send-failed",
+                        "text": payload.get("text", ""),
+                        "ts": payload.get("sender_timestamp"),
+                        "snr": payload.get("SNR"),
+                        "path_len": payload.get("path_len"),
+                        "pubkey_prefix": payload.get("pubkey_prefix", "")[:12],
+                    })
+                else:
+                    self._record_dropped(payload.get("channel_idx"), "send-failed", payload)
 
     # ===== incoming (matrix → mesh) ==================================
 

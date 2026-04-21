@@ -356,6 +356,21 @@ The channel key is auto-derived as `sha256(name)[:16]` — that is the
 scope convention used by most regional MeshCore communities (so
 everyone who uses e.g. the name `de-nw-owl` ends up on the same key).
 
+### Checking what was dropped
+
+If a channel is active on the mesh but nothing lands in Matrix, that's
+almost always one of: `relay` is off, no Matrix room is bound to the
+slot yet, or the bot is not in the bound room. `!mesh queue` shows this
+explicitly:
+
+```
+!mesh queue                # per-channel seen / dropped counters
+!mesh queue 7              # last ~20 dropped messages on slot 7 (text + SNR + hops)
+```
+
+The bookkeeping lives for the lifetime of the bridge process and resets
+on restart — it is a runtime signal, not a history.
+
 ### Inbound message format
 
 Channel and DM messages include both the hop count (from the packet's
