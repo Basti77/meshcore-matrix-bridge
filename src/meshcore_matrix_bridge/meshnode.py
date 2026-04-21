@@ -252,6 +252,33 @@ class MeshNode:
                 out.append(dict(r.payload))
         return out
 
+    async def set_channel(
+        self, idx: int, name: str, secret: bytes | None = None
+    ) -> dict[str, Any]:
+        """Write a channel slot on the node.
+
+        If ``secret`` is None the meshcore-lib derives the 16-byte key
+        from ``sha256(name)[:16]`` — the scope convention most regional
+        MeshCore communities use.
+        """
+        assert self.mc is not None
+        r = await self.mc.commands.set_channel(idx, name, secret)
+        if r.type == EventType.ERROR:
+            return {"ok": False, "error": r.payload}
+        return {"ok": True}
+
+    async def find_free_channel_slot(self, max_index: int = 32) -> int | None:
+        """Return the lowest slot whose ``channel_name`` is empty."""
+        assert self.mc is not None
+        for idx in range(max_index):
+            r = await self.mc.commands.get_channel(idx)
+            if r.type == EventType.ERROR:
+                return None
+            p = r.payload if isinstance(r.payload, dict) else {}
+            if not p.get("channel_name"):
+                return idx
+        return None
+
     # ----- actions ------------------------------------------------------
 
     async def send_dm(self, target: str, text: str) -> dict[str, Any]:

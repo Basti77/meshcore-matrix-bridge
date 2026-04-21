@@ -41,6 +41,12 @@ Channels / rooms
                                      (does NOT delete the room).
   {prefix} relay <idx> on|off      — toggle auto-forwarding of channel RX
                                      into the bound Matrix room.
+  {prefix} addchan <name> [idx]    — write a channel slot on the node
+                                     (key auto-derived from sha256(name)).
+                                     Picks the lowest free slot if <idx>
+                                     is omitted.
+  {prefix} delchan <idx>           — clear slot <idx> on the node and
+                                     forget its Matrix binding.
   {prefix} fetch [idx]             — drain the node's pending-message queue.
                                      Without <idx>, drops everything into the
                                      bound rooms (DMs stay in control room).
@@ -94,17 +100,19 @@ def fmt_msg(kind: str, payload: dict[str, Any], node: MeshNode) -> tuple[str, st
     text = payload.get("text", "")
     ts = payload.get("sender_timestamp")
     snr = payload.get("SNR")
+    path_len = payload.get("path_len")
     ts_str = _fmt_ts(ts)
+    hops_str = _fmt_hops(path_len)
     if kind == "dm":
         pk = payload.get("pubkey_prefix", "")[:12]
         contact = None
         if node.mc is not None:
             contact = node.mc.get_contact_by_key_prefix(pk)
         sender = (contact or {}).get("adv_name") or pk
-        plain = f"[DM {sender}] {text}  (snr={snr}, {ts_str})"
+        plain = f"[DM {sender}] {text}  ({hops_str}, snr={snr}, {ts_str})"
         html = (
             f"📩 <b>DM</b> from <b>{_escape(sender)}</b> <code>{pk}</code><br/>"
-            f"{_escape(text)}<br/><small>snr={snr} {ts_str}</small>"
+            f"{_escape(text)}<br/><small>{hops_str} snr={snr} {ts_str}</small>"
         )
         return plain, html
     # channel
@@ -119,9 +127,28 @@ def fmt_msg(kind: str, payload: dict[str, Any], node: MeshNode) -> tuple[str, st
         sender = (contact or {}).get("adv_name") or pk
         prefix_plain = f"<{sender}> "
         prefix_html = f"<b>&lt;{_escape(sender)}&gt;</b> "
-    plain = f"[CH#{idx}] {prefix_plain}{text}  (snr={snr}, {ts_str})"
-    html = f"📡 <b>#{idx}</b> {prefix_html}{_escape(text)}<br/><small>snr={snr} {ts_str}</small>"
+    plain = f"[CH#{idx}] {prefix_plain}{text}  ({hops_str}, snr={snr}, {ts_str})"
+    html = f"📡 <b>#{idx}</b> {prefix_html}{_escape(text)}<br/><small>{hops_str} snr={snr} {ts_str}</small>"
     return plain, html
+
+
+def _fmt_hops(path_len: Any) -> str:
+    """Format the path_len field from a received mesh packet.
+
+    meshcore-lib conventions:
+      * ``path_len == 0``  → direct / zero-hop reception
+      * ``path_len == -1`` → flood-routed, concrete hop count unknown
+      * ``path_len >= 1``  → number of intermediate repeaters
+    """
+    if path_len is None:
+        return "hops=?"
+    try:
+        n = int(path_len)
+    except (TypeError, ValueError):
+        return f"hops={path_len}"
+    if n < 0:
+        return "hops=flood"
+    return f"hops={n}"
 
 
 class CommandHandler:
@@ -230,6 +257,36 @@ class CommandHandler:
                     f"✓ relay for #{idx} = {'on' if on else 'off'}"
                     if ok else f"no binding for #{idx} (bind first)"
                 )
+
+            if cmd == "addchan":
+                if not rest:
+                    return CommandResult("usage: !mesh addchan <name> [idx]")
+                name = rest[0]
+                if len(rest) > 1 and rest[1].lstrip("-").isdigit():
+                    idx = int(rest[1])
+                else:
+                    free = await self.node.find_free_channel_slot()
+                    if free is None:
+                        return CommandResult("no free channel slot on the node")
+                    idx = free
+                res = await self.node.set_channel(idx, name)
+                if not res.get("ok"):
+                    return CommandResult(f"✗ set_channel failed: {res.get('error')}")
+                return CommandResult(
+                    f"✓ channel slot #{idx} = {name!r} "
+                    f"(key auto-derived; use `!mesh bind {idx}` to map to a Matrix room)"
+                )
+
+            if cmd == "delchan":
+                if not rest or not rest[0].lstrip("-").isdigit():
+                    return CommandResult("usage: !mesh delchan <idx>")
+                idx = int(rest[0])
+                res = await self.node.set_channel(idx, "", b"\x00" * 16)
+                if not res.get("ok"):
+                    return CommandResult(f"✗ clear slot #{idx} failed: {res.get('error')}")
+                unbound = self.bridge.unbind_channel(idx)
+                suffix = " (Matrix binding also forgotten)" if unbound else ""
+                return CommandResult(f"✓ cleared node slot #{idx}{suffix}")
 
             if cmd == "fetch":
                 only_idx: int | None = None

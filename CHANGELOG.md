@@ -3,6 +3,29 @@
 All notable changes are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.0] — 2026-04-21
+
+### Added
+- Channel-slot management from Matrix:
+  - `!mesh addchan <name> [idx]` writes a channel slot on the node. If
+    `idx` is omitted the lowest free slot is picked. The 16-byte key is
+    auto-derived from `sha256(name)[:16]` — the scope convention used by
+    regional MeshCore communities (e.g. `de`, `de-nw-owl`, `europe`).
+  - `!mesh delchan <idx>` clears a slot on the node and forgets the
+    matching Matrix binding in one step.
+- Hop count is now surfaced on every inbound message. Channel and DM
+  formatting gained a `hops=N` field derived from the packet's
+  `path_len`:
+  - `hops=0` — direct / zero-hop reception
+  - `hops=N` — reached via N intermediate repeaters
+  - `hops=flood` — flood-routed, exact hop count unknown
+    (`path_len == -1`)
+  - `hops=?` — field not present in the payload (older firmware)
+
+### Changed
+- Inbound message format: `snr` is now rendered after `hops`, so
+  messages read `hops=2 snr=12.25 ts=07:56:22 UTC`.
+
 ## [0.1.0] — 2026-04-19
 
 Initial public release.

@@ -340,6 +340,39 @@ Other useful commands in the control DM:
 !mesh fetch                         # drain everything
 ```
 
+### Managing channel slots on the node
+
+The MeshCore node keeps a small table of channel slots — each one is a
+(name, 16-byte key) pair. To avoid dropping into a shell / Python script
+just to add a regional channel, you can do it from the control DM:
+
+```
+!mesh addchan de-nw-owl             # auto-picks the lowest free slot
+!mesh addchan europe 10             # or specify a slot explicitly
+!mesh delchan 10                    # clears the slot and forgets its Matrix binding
+```
+
+The channel key is auto-derived as `sha256(name)[:16]` — that is the
+scope convention used by most regional MeshCore communities (so
+everyone who uses e.g. the name `de-nw-owl` ends up on the same key).
+
+### Inbound message format
+
+Channel and DM messages include both the hop count (from the packet's
+`path_len`) and the SNR:
+
+```
+📡 #6 <Sam> danke für das feedback
+   hops=2 snr=12.25 ts=07:56:22 UTC
+```
+
+Special values:
+
+- `hops=0` — direct / zero-hop reception
+- `hops=N` — reached via N repeaters
+- `hops=flood` — flood-routed, exact hop count unknown
+- `hops=?` — field not present in payload (older firmware)
+
 If `relay` is **off** for a channel (the default), RX from that channel is
 just logged — use `!mesh fetch` / `!mesh public` to pull it on demand.
 
