@@ -1,192 +1,143 @@
 # meshcore-matrix-bridge
 
+[![CI](https://github.com/Basti77/meshcore-matrix-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/Basti77/meshcore-matrix-bridge/actions/workflows/ci.yml)
+
 A small, self-hosted bridge between a [MeshCore](https://meshcore.co.uk/) node
-running the **Companion** firmware (connected over USB / serial) and a
+running the **Companion** firmware (connected over USB serial or BLE) and a
 [Matrix](https://matrix.org/) homeserver.
 
-The bridge is controlled from Matrix with a single command prefix (`!mesh …`)
-and can also be driven purely from the terminal (`mc-cli`) for quick send /
-receive tests without Matrix.
+LoRa mesh channels become public Matrix rooms: anyone may read along,
+only allow-listed users may transmit — the amateur-radio model. The
+bridge is controlled from Matrix with a single command prefix
+(`!mesh …`) and can also be driven purely from the terminal (`mc-cli`)
+for quick send/receive tests without Matrix.
 
-> **Status:** `0.4.0`. The bridge is in daily use on a private home
-> server. Channel history has to be pulled manually (via `!mesh fetch`
-> or `!mesh public`) because the MeshCore companion firmware itself
-> does not keep a long-term channel history — it only exposes a
-> pending-messages queue that must be drained by the host. Silently
-> dropped channel messages are persisted to a local JSONL log so that
-> `!mesh queue` can tell you what you missed even across restarts.
+> 🇩🇪 **Deutsche Kurzanleitung:** [README.de.md](README.de.md)
 
----
-
-## ⚠️ Zielgruppe / Audience
-
-This project is **not a click-and-go appliance**. You need to be
-comfortable with: a Linux server that you administer yourself, systemd
-user services, editing `.env` files, `journalctl`, and the basics of
-your Matrix homeserver (how to create a user, how to get an access
-token). If any of that sounds exhausting, come back after you have a
-Matrix server running and a MeshCore Companion node that talks to your
-phone.
-
-In short: this is an amateur-radio-style home-brew bridge for people
-who already run their own Matrix server. There is currently **no
-install script** — the steps below have to be done by hand. If someone
-shows up and wants to help turn this into a one-liner installer, that
-would be very welcome; open an issue.
+> **Status:** in daily use on the author's home server, tested with
+> MeshCore Companion firmware v1.14.x on RAK4631 and Heltec V3. See
+> [CHANGELOG.md](CHANGELOG.md) for versions.
 
 ---
 
-## 🇩🇪 Schnellüberblick auf Deutsch
+## How it works
 
-**Kein Projekt für Einsteiger.** Du solltest mit Linux-Server-Administration
-(systemd, `.env`, `journalctl`) und deinem Matrix-Homeserver (Benutzer
-anlegen, Access-Token holen) vertraut sein. Wenn dir schon einer dieser
-Begriffe unheimlich ist, richte erst deinen Matrix-Server ein und
-besorge dir einen MeshCore-Companion-Node, der mit deinem Handy spricht
-— komm dann wieder.
+```
+┌──────────────┐   Matrix C2S    ┌──────────────────────┐   Companion protocol   ┌───────────────┐
+│ Element      │ ◀─────────────▶ │ meshcore-matrix-     │ ◀────────────────────▶ │ MeshCore node │
+│ (you + bots) │                 │ bridge  (@meshcore)  │   USB serial or BLE    │ Companion fw  │
+└──────────────┘                 └──────────────────────┘                        └───────────────┘
+```
 
-Was dabei entsteht: Ein Matrix-Bot (`@meshcore:dein.server`), der auf
-deinem Homeserver läuft, per USB oder BLE mit deinem MeshCore-Node
-spricht und LoRa-Nachrichten in Matrix-Räume spiegelt (und zurück).
-Das ist quasi „Amateurfunk-Style auf Matrix": jeder darf mitlesen, nur
-zugelassene MXIDs dürfen senden.
+The bridge logs in to your homeserver as a bot account and talks to the
+node through the [`meshcore`](https://pypi.org/project/meshcore/) Python
+library. On first start it opens a **private control DM** with you; from
+there you bind mesh channel slots to **public Matrix rooms** (`!mesh
+bind`), toggle live relaying per channel (`!mesh relay`), and send DMs
+or channel messages. Incoming radio messages arrive as events and are
+mirrored into the bound rooms; messages typed in a bound room go out on
+the air, auto-split at ~140 characters with `(i/n)` prefixes.
 
-### Was du brauchst
-
-- Einen **eigenen Matrix-Homeserver** (Synapse, Conduit, Dendrite —
-  egal, Hauptsache du kannst dort einen Nutzer anlegen und einen
-  Access-Token holen). Wenn du nur auf matrix.org o.ä. einen Account
-  hast: geht technisch auch, ist aber wegen Rate-Limits und
-  Room-Creation-Restrictions mühsam. Eigener Server ist klar empfohlen.
-- Einen **MeshCore-Node mit Companion-Firmware** (Heltec V3, RAK4631,
-  T-Beam, …), angeschlossen entweder per USB an deinen Server oder
-  per BLE in Reichweite des Servers.
-- Einen **Linux-Host** auf dem die Bridge läuft (idealerweise derselbe
-  Host wie der Matrix-Server; spart Netzwerklatenz). Python ≥ 3.10,
-  `systemd --user`, kein Docker nötig.
-
-### Reihenfolge, die wir erfolgreich gegangen sind
-
-1. **Matrix-Server läuft, du hast einen regulären Matrix-Account**
-   (`@du:dein.server`) und kannst dich mit Element o.ä. einloggen.
-2. **Bot-Account anlegen** (`@meshcore:dein.server`) — bei Synapse über
-   `register_new_matrix_user` im Container. Kein Admin-Recht nötig.
-3. **Access-Token + Device-ID holen** über die `/login`-API (Beispiel
-   weiter unten im Abschnitt *Creating the Matrix bot user*).
-4. **MeshCore-Node verkabeln/koppeln** — entweder USB-CDC (`/dev/ttyUSB0`
-   bzw. `/dev/ttyACM0`) oder BLE (einmalig die BT-Adresse scannen). Das
-   **Handy muss den Node in dem Moment nicht gekoppelt haben** — der
-   Node akzeptiert nur **einen** BLE-Central gleichzeitig.
-5. **Bridge klonen, Venv anlegen, `pip install .`** (siehe
-   *Installation* unten).
-6. **`bridge.env` ausfüllen** unter `~/.meshcore-bridge-secrets/` mit
-   Homeserver-URL, Bot-MXID, Access-Token, Device-ID, Allowlist (deine
-   eigene MXID), dem MeshCore-Transport und -Port.
-7. **Einmal im Vordergrund starten** (`meshcore-matrix-bridge`) und in
-   Element die DM annehmen, die der Bot dir schickt. Er postet dort
-   `🟢 online`.
-8. **Die eigenen MeshCore-Channels auf dem Node anlegen** — entweder
-   vorher per App, oder aus der Matrix-DM heraus:
-   `!mesh addchan de-nw-owl`, `!mesh addchan europe`, …. Der Key wird
-   aus `sha256(name)[:16]` abgeleitet (regionale Konvention, z. B.
-   deutsche OWL-Community: `de`, `de-nw`, `de-nw-owl`, `de-west`,
-   `europe`).
-9. **Pro Channel einen Matrix-Raum binden und Relay anschalten:**
-   `!mesh bind 0 mesh-de`, `!mesh relay 0 on`. Dann dem neu erzeugten
-   Raum in Element beitreten — ab da kommen Funk-Nachrichten live in
-   den Raum und was du dort tippst geht raus.
-10. **Als systemd-User-Service einrichten** damit die Bridge reboots
-    überlebt (siehe *systemd (user scope)* unten). `loginctl
-    enable-linger` nicht vergessen.
-11. **Sanity-Checks:** `!mesh status` (Node-Info), `!mesh channels`
-    (Slot/Raum-Zuordnung), `!mesh queue` (was wurde empfangen / was
-    fiel wo hin).
-
-### Bots daraufsetzen
-
-Der Bridge-Code ist absichtlich **schmal** — alles was „Bot-haftes"
-macht (Wetter-Ticker, Mention-Responder, LLM-Relay, Cron-Ansagen)
-lebt als **separater Prozess** in einem eigenen Repo:
-[`Basti77/meshcore-bots`](https://github.com/Basti77/meshcore-bots).
-Ein Bot braucht nichts weiter als einen eigenen Matrix-Account, der
-in den gewünschten Channel-Raum eingeladen wird. Er postet dort ganz
-normal Nachrichten — die Bridge fängt die automatisch ab und sendet
-sie aufs LoRa-Netz. Umgekehrt kommen eingehende Mesh-Nachrichten
-wieder im selben Raum an und sind damit für den Bot lesbar.
-
-Ergebnis: **Jeder Matrix-Bot, den du ohnehin schon hast (n8n, Python,
-Home Assistant, Shell-Skript mit `curl`), wird dadurch ohne weitere
-Integration mesh-fähig.** Einladen, Power-Level 50 geben, fertig.
-
-### Es gibt aktuell kein Install-Skript
-
-Bewusste Entscheidung — die Zielgruppe ist klein genug, dass ein
-Skript mehr Mythos als Nutzen wäre. Wenn sich jemand ernsthaft
-dransetzen will: gerne Issue aufmachen oder per Matrix melden, dann
-bauen wir das gemeinsam.
+Protocol details (framing, event flow, firmware quirks) live in
+[docs/meshcore-protocol.md](docs/meshcore-protocol.md).
 
 ---
 
 ## Features
 
-- USB-serial connection to a MeshCore Companion node (via
-  [`meshcore`](https://pypi.org/project/meshcore/) ≥ 2.3).
-- Matrix bot account operating in an unencrypted DM control room (the bot
-  creates the room and invites you on first start).
-- `!mesh <subcommand>` from Matrix:
+- **Two transports:** USB-CDC serial and BLE (many RAK4631 Companion
+  builds are BLE-only; BLE is a first-class citizen).
+- **Channels as public Matrix rooms:** world-readable, public-join,
+  power levels so only the bot and allow-listed users can transmit.
+- **`!mesh` commands from Matrix:**
   - `help`, `status`, `ping`
   - `contacts` — list known MeshCore contacts
-  - `channels` — list configured channels (indexes + names)
-  - `fetch [limit]` — manually drain the node's pending-messages queue and
-    dump DMs + channel messages into the Matrix room
-  - `public [limit]` — same, but filtered to the `#public` channel
-  - `dm <name|keyprefix> <text…>` — send a direct message to a MeshCore
-    contact (with retry + flood-fallback, waits for ACK)
-  - `send <channel_idx> <text…>` — send a message to a channel (e.g. `0` for
-    `#public`)
-- Optional auto-relay of incoming channel messages to the Matrix room
-  (disabled by default — `#public` can be very chatty).
-- Strict allow-list of Matrix users that may control the bridge.
-- Persistent state (JSON) for the bridge room ID and later
-  cursors.
-- Standalone CLI (`mc-cli`) that reuses the same logic without Matrix.
+  - `channels` — list channel slots with bound room + relay state
+  - `bind <idx> [alias]` / `unbind <idx>` — map a channel slot to a
+    Matrix room
+  - `relay <idx> on|off` — live-forward channel RX into the bound room
+  - `addchan <name> [idx]` / `delchan <idx>` — manage channel slots on
+    the node (key auto-derived as `sha256(name)[:16]`, the convention
+    used by regional MeshCore communities)
+  - `fetch [limit]` / `public [limit]` — manually drain the node's
+    pending-message queue
+  - `dm <name|keyprefix> <text…>` — direct message with retry, flood
+    fallback and ACK wait
+  - `send <channel_idx> <text…>` — transmit into a channel
+  - `queue [idx]` — seen/dropped bookkeeping per channel, backed by a
+    persistent JSONL drop log that survives restarts
+  - `telemetry <name>` — request LPP telemetry (battery, temperature, …)
+    from a repeater / room server / companion
+  - `autolog add|remove <name>` — poll telemetry periodically in the
+    background
+  - `chart <name> [hours]` — render the recorded telemetry as a PNG
+    chart and post it into the room (needs the optional `chart` extra)
+- **Node watchdog:** heartbeat probe with online/offline notices in the
+  control room; the bridge exits (and systemd restarts it) if the
+  Matrix sync loop ever dies.
+- **Strict allow-list** gating both command dispatch and invite
+  auto-accept.
+- **Standalone CLI** (`mc-cli`) that reuses the same logic without
+  Matrix; `--json` for scripting.
 
 ---
 
-## Architecture
+## Requirements
 
-```
-┌───────────────┐   Matrix C2S     ┌──────────────────────┐
-│  Element (you)│ ───────────────▶ │  @meshcore (bot)     │
-└───────────────┘                  │  matrix-nio, Allowed │
-                                   │  users only          │
-                                   └──────────┬───────────┘
-                                              │ !mesh commands
-                                              ▼
-                                   ┌──────────────────────┐
-                                   │  CommandHandler       │
-                                   │  dispatches to        │
-                                   └──────────┬───────────┘
-                                              │ async
-                                              ▼
-                                   ┌──────────────────────┐   0x3E framed
-  ┌────────────────────┐   serial  │  MeshNode (meshcore   │ ◀───────────┐
-  │  MeshCore node    │ ◀──────── │  py lib)               │             │
-  │  Companion fw     │ ────────▶ │  subscribe RX events   │  push events│
-  └────────────────────┘           └──────────────────────┘─────────────┘
-```
+- A Linux host with Python ≥ 3.10 and `systemd --user` (no Docker
+  needed). Ideally the same machine that runs your homeserver.
+- A **Matrix homeserver account for the bot**. Your own server
+  (Synapse, Conduit, Dendrite) is strongly recommended; a third-party
+  server like matrix.org works but is throttled — see
+  [Option B](#option-b--a-homeserver-you-dont-own-matrixorg-element-home-)
+  below.
+- A **MeshCore node running the Companion firmware** (Heltec V3,
+  RAK4631, T-Beam, …), attached over USB or within BLE range. Tested
+  with Companion v1.14.x.
+- Comfort with the basics: systemd user services, `.env` files,
+  `journalctl`, creating a Matrix user and getting an access token.
 
-The MeshCore Python library implements the Companion UART protocol (frames
-delimited by `0x3C` / `0x3E`). Incoming radio messages arrive as events
-(`CONTACT_MSG_RECV`, `CHANNEL_MSG_RECV`). The bot either auto-fetches the
-message queue (`MESSAGES_WAITING` → `get_msg` loop) or drains it on demand when
-you send `!mesh fetch`.
+There is no installer yet — setup is manual (the target audience is
+small). Contributions welcome; open an issue if you want to change that.
+
+---
+
+## Quick start
+
+The condensed path; every step links to a detail section below.
+
+1. Have your Matrix server running and a regular account
+   (`@you:your.server`) you can log into with Element.
+2. Create the bot account (`@meshcore:your.server`) — no admin rights
+   needed ([details](#creating-the-matrix-bot-user)).
+3. Get an access token + device ID via the `/login` API
+   ([details](#getting-a-token-via-the-login-api)).
+4. Attach the MeshCore node — USB (`/dev/ttyACM0`/`/dev/ttyUSB0`) or
+   BLE. Note: the node accepts **one** BLE central at a time, so
+   disconnect the phone first ([details](#transport-serial-vs-ble)).
+5. Clone, create a venv, `pip install .`
+   ([details](#installation)).
+6. Fill in `bridge.env` under `~/.meshcore-bridge-secrets/`
+   ([details](#configuration)).
+7. Run `meshcore-matrix-bridge` once in the foreground and accept the
+   DM the bot sends you — it posts `🟢 online` there
+   ([details](#running)).
+8. Create your channel slots on the node, either via the phone app or
+   from the control DM: `!mesh addchan de-nw-owl`, `!mesh addchan
+   europe`, …
+9. Bind a Matrix room per channel and enable relaying:
+   `!mesh bind 0 mesh-de`, `!mesh relay 0 on`, then join the created
+   room ([details](#using-it-from-matrix)).
+10. Install the systemd user service so the bridge survives reboots;
+    don't forget `loginctl enable-linger`
+    ([details](#systemd-user-scope)).
+11. Sanity checks: `!mesh status`, `!mesh channels`, `!mesh queue`.
 
 ---
 
 ## Installation
 
-On the host that will have the MeshCore node plugged in (e.g. `sentinel`):
+On the host that has the MeshCore node attached:
 
 ```bash
 git clone https://github.com/Basti77/meshcore-matrix-bridge.git
@@ -196,6 +147,8 @@ cd meshcore-matrix-bridge
 python3 -m venv ~/.local/venvs/meshcore-matrix-bridge
 ~/.local/venvs/meshcore-matrix-bridge/bin/pip install -U pip
 ~/.local/venvs/meshcore-matrix-bridge/bin/pip install .
+# optional: PNG charts for `!mesh chart`
+~/.local/venvs/meshcore-matrix-bridge/bin/pip install '.[chart]'
 
 # Make the entry points visible on PATH
 mkdir -p ~/.local/bin
@@ -286,7 +239,7 @@ docker exec matrix-synapse register_new_matrix_user \
 ```
 
 If the interactive prompt is awkward, Synapse also accepts a shared-secret
-registration over HTTP (`/\_synapse/admin/v1/register`) — handy when
+registration over HTTP (`/_synapse/admin/v1/register`) — handy when
 scripting the setup.
 
 ### Option B — a homeserver you don't own (matrix.org, Element Home, ...)
@@ -319,7 +272,7 @@ All of that is normal user territory on most open homeservers. Steps:
 Works against any homeserver:
 
 ```bash
-curl -s -X POST https://matrix.example.com/_matrix/client/v3/login \
+curl -s -X POST https://matrix.example.org/_matrix/client/v3/login \
   -H 'Content-Type: application/json' \
   -d '{"type":"m.login.password",
        "identifier":{"type":"m.id.user","user":"meshcore"},
@@ -334,8 +287,7 @@ Copy `access_token` and `device_id` into `bridge.env`.
 - **Room creation policies.** Some servers forbid fresh accounts from
   creating public rooms (anti-spam). If `!mesh bind` fails with an HTTP
   403, create the channel room manually in Element, make the bot an admin
-  (PL 100), and tell the bridge the room ID via `MATRIX_ROOM_ID=...` for
-  the control room, or via a future config option for channel rooms.
+  (PL 100), and pin the control room via `MATRIX_ROOM_ID=...`.
 - **Rate limits.** Large contact lists or bulk `fetch` commands can trip
   per-user rate limits on big homeservers. There is no workaround from the
   client side — just expect occasional `M_LIMIT_EXCEEDED` errors and let
@@ -361,10 +313,13 @@ Copy `access_token` and `device_id` into `bridge.env`.
 
 ## Configuration
 
-The bridge reads environment variables. They can come from one or more `.env`
-files — by default the bridge looks at
-`~/.meshcore-bridge-secrets/matrix.env` and `~/.meshcore-bridge-secrets/bridge.env`
-(override via `MESH_BRIDGE_ENV_FILES=path1:path2`).
+The bridge reads environment variables. They can come from one or more
+`.env` files; by default it looks for
+`~/.meshcore-bridge-secrets/matrix.env` **and**
+`~/.meshcore-bridge-secrets/bridge.env` (first value wins, missing files
+are skipped — using a single `bridge.env` for everything is fine; the
+two-file split just lets you keep the Matrix token separate from tunables).
+Override the list via `MESH_BRIDGE_ENV_FILES=path1:path2`.
 
 Keep secrets (the access token) in a file with `chmod 600`:
 
@@ -380,14 +335,16 @@ Minimum required keys:
 
 | Key | Meaning |
 |---|---|
-| `MATRIX_HOMESERVER` | e.g. `https://matrix.example.com` |
-| `MATRIX_USER_ID` | `@meshcore:matrix.example.com` |
+| `MATRIX_HOMESERVER` | e.g. `https://matrix.example.org` |
+| `MATRIX_USER_ID` | `@meshcore:matrix.example.org` |
 | `MATRIX_ACCESS_TOKEN` | from `/login` |
 | `MATRIX_DEVICE_ID` | from `/login` |
 | `MATRIX_ALLOWED_USERS` | comma-separated MXID allow-list; first entry is invited to the DM control room |
-| `MESHCORE_PORT` | serial port, e.g. `/dev/ttyUSB0` |
+| `MESHCORE_PORT` | serial port (e.g. `/dev/ttyUSB0`) or BLE address |
 
-See `bridge.env.example` for all options.
+See `bridge.env.example` for all options. Note that **channel relaying
+is not configured via env** — it is runtime state, toggled per channel
+with `!mesh relay <idx> on|off` and persisted in the state file.
 
 ---
 
@@ -402,7 +359,7 @@ meshcore-matrix-bridge
 
 On first start the bot will
 
-1. open `/dev/ttyUSB0` and query the node,
+1. open the configured port and query the node,
 2. subscribe to RX events and start auto-fetching,
 3. create a DM with the first entry of `MATRIX_ALLOWED_USERS` (unless
    `MATRIX_ROOM_ID` is pinned) and post a `🟢 online` notice there.
@@ -417,6 +374,10 @@ systemctl --user enable --now meshcore-matrix-bridge.service
 loginctl enable-linger "$USER"          # keep running across logouts
 journalctl --user -u meshcore-matrix-bridge -f
 ```
+
+The unit uses `Restart=on-failure`; the bridge exits non-zero when the
+Matrix sync loop dies (expired token, network trouble), so systemd
+brings it back up instead of leaving a half-alive process.
 
 ---
 
@@ -468,6 +429,22 @@ The channel key is auto-derived as `sha256(name)[:16]` — that is the
 scope convention used by most regional MeshCore communities (so
 everyone who uses e.g. the name `de-nw-owl` ends up on the same key).
 
+### Telemetry
+
+Repeaters, room servers and companions answer LPP telemetry requests
+(battery voltage, temperature, and whatever sensors the build exposes):
+
+```
+!mesh telemetry Repeater-OWL        # one-shot request
+!mesh autolog add Repeater-OWL      # poll every 15 min (TELEMETRY_INTERVAL_S)
+!mesh chart Repeater-OWL 48         # PNG chart of the last 48 h
+```
+
+`chart` needs matplotlib (`pip install '.[chart]'`); everything else
+works without it. Samples are stored as JSONL under
+`~/.local/state/meshcore-matrix-bridge/telemetry.jsonl` (rotated at
+10 MB).
+
 ### Checking what was dropped
 
 If a channel is active on the mesh but nothing lands in Matrix, that's
@@ -510,6 +487,19 @@ Special values:
 If `relay` is **off** for a channel (the default), RX from that channel is
 just logged — use `!mesh fetch` / `!mesh public` to pull it on demand.
 
+### Building bots on top
+
+The bridge is deliberately **narrow** — anything bot-like (weather
+ticker, mention responder, LLM relay, cron announcements) lives as a
+separate process in its own repo:
+[`Basti77/meshcore-bots`](https://github.com/Basti77/meshcore-bots).
+A bot needs nothing but its own Matrix account invited into the desired
+channel room (power level 50). It posts plain messages there — the
+bridge picks them up and transmits them; inbound mesh messages appear
+in the same room for the bot to read. **Any Matrix bot you already have
+(n8n, Python, Home Assistant, a shell script with `curl`) becomes
+mesh-capable without further integration.**
+
 ---
 
 ## Using it from the terminal (no Matrix)
@@ -542,10 +532,12 @@ Add `--json` for machine-readable output.
   -1`). Try `!mesh dm` again; the library already tries flood after two
   direct attempts.
 - **No channel backlog appears** — the Companion firmware does not persist
-  channel history. `!mesh fetch` / `!mesh public` only return messages that
-  were **queued by the node since the last drain**. The bridge should
+  channel history; it only exposes a pending-messages queue that must be
+  drained by the host. `!mesh fetch` / `!mesh public` only return messages
+  that were **queued by the node since the last drain**. The bridge should
   normally auto-fetch; the manual command is there mostly for debugging /
-  catching up after a bridge restart.
+  catching up after a bridge restart. `!mesh queue` tells you what was
+  dropped and why, even across restarts.
 
 ---
 
@@ -565,9 +557,13 @@ Add `--json` for machine-readable output.
 
 ```bash
 pip install -e .[dev]
-ruff check src/
+ruff check src/ tests/
 mypy src/
+pytest
 ```
+
+CI runs the same three checks on every push. Protocol notes for future
+maintainers: [docs/meshcore-protocol.md](docs/meshcore-protocol.md).
 
 ---
 

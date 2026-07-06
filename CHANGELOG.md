@@ -3,6 +3,45 @@
 All notable changes are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.5.0] — 2026-07-06
+
+### Added
+- LPP telemetry support: `!mesh telemetry <name|keyprefix>` requests
+  battery/temperature/… from a repeater, room server or companion;
+  `!mesh autolog add|remove <name>` polls targets periodically in the
+  background (`TELEMETRY_INTERVAL_S`, default 900 s); `!mesh chart
+  <name> [hours]` renders the recorded series as a PNG and posts it as
+  an image. Samples are persisted as JSONL (rotated at 10 MB).
+- Unit tests for the pure logic (textsplit, command parsing, format
+  helpers, drop log, state store, config) and a GitHub Actions CI that
+  runs ruff + mypy + pytest on Python 3.10 and 3.12.
+
+### Fixed
+- The Matrix sync task is now watched: if it dies (expired token,
+  persistent network failure) the bridge exits non-zero so systemd
+  restarts it, instead of lingering with a dead sync loop.
+- An unbalanced quote/apostrophe in a `!mesh` command (`!mesh dm Bob
+  don't panic`) no longer kills the dispatch — the parser falls back to
+  a plain whitespace split.
+- `__version__` had drifted from the package version; it is now read
+  from the package metadata.
+
+### Changed
+- matplotlib is an optional extra (`pip install '.[chart]'`) — only
+  `!mesh chart` needs it.
+- `bridge.env.example` uses neutral `example.org` placeholders; the
+  env-file fallback path no longer hard-codes the author's home
+  directory.
+- README restructured (quick start, feature list brought up to date);
+  the German quickstart moved to `README.de.md`.
+
+### Removed
+- `MESH_RELAY_CHANNELS` / `MESH_RELAY_CHANNEL_INDEXES`: both were
+  parsed but never evaluated anywhere. Relaying is runtime state,
+  toggled per channel via `!mesh relay <idx> on|off` and persisted in
+  the state file.
+- The `aiofiles` dependency (declared but never imported).
+
 ## [0.4.0] — 2026-04-21
 
 ### Added
@@ -66,7 +105,6 @@ Initial public release.
 - Matrix client (`MatrixBot`) based on `matrix-nio`, unencrypted, with
   allow-list, auto-accept for invites from allow-listed users, and
   auto-creation of a DM control room on first start.
-### Added
 - `!mesh` command handler: `help`, `status`, `ping`, `contacts`, `channels`,
   `bind <idx> [alias]`, `unbind <idx>`, `relay <idx> on|off`,
   `fetch [idx]`, `public [limit]`, `dm <target> <text>`,
