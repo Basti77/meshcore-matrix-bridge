@@ -30,6 +30,14 @@ MeshCore state
 Direct messaging
   {prefix} dm <name|keyprefix> <text…>
                                     — send a DM (retries + flood fallback)
+  {prefix} telemetry <name|keyprefix>
+                                    — request LPP telemetry (battery/temp/…)
+                                      from a repeater/companion/room-server
+  {prefix} autolog                 — list targets polled periodically
+  {prefix} autolog add <name>      — start periodic polling of <name>
+  {prefix} autolog remove <name>   — stop periodic polling
+  {prefix} chart <name> [hours]    — render a PNG chart of the recorded
+                                      telemetry (default: 24 h, max 720)
 
 Channels / rooms
   {prefix} bind <idx> [alias]      — create (or reuse) a Matrix room for
@@ -405,6 +413,142 @@ class CommandHandler:
                 if r["ok"]:
                     return CommandResult(f"✓ DM to {target} delivered")
                 return CommandResult(f"✗ DM to {target} failed: {r.get('error')}")
+
+            if cmd == "telemetry":
+                if not rest:
+                    return CommandResult("usage: !mesh telemetry <name|keyprefix>")
+                target = rest[0]
+                r = await self.node.telemetry(target)
+                if not r["ok"]:
+                    return CommandResult(f"✗ telemetry {target} failed: {r.get('error')}")
+                sensors = r.get("sensors") or []
+                # group LPP values by channel/type → compact lines
+                # LPP types we care to label nicely (others fall back to raw type name)
+                LABEL = {
+                    "voltage": ("🔋", "V"),
+                    "battery": ("🔋", "V"),
+                    "temperature": ("🌡", "°C"),
+                    "humidity": ("💧", "%"),
+                    "pressure": ("📉", "hPa"),
+                    "luminosity": ("☀️", "lx"),
+                    "gps": ("📍", ""),
+                }
+                lines: list[str] = []
+                for s in sensors:
+                    if not isinstance(s, dict):
+                        continue
+                    typ = str(s.get("type") or "").lower()
+                    val = s.get("value")
+                    ch = s.get("channel")
+                    ico, unit = LABEL.get(typ, ("·", ""))
+                    if typ == "voltage" and isinstance(val, (int, float)):
+                        pretty = f"{val:.2f} {unit}"
+                    elif typ == "temperature" and isinstance(val, (int, float)):
+                        pretty = f"{val:.1f} {unit}"
+                    elif isinstance(val, float):
+                        pretty = f"{val:.2f} {unit}".rstrip()
+                    else:
+                        pretty = f"{val} {unit}".rstrip()
+                    label = s.get("type") or "?"
+                    ch_str = f" (ch{ch})" if ch not in (None, 1) else ""
+                    lines.append(f"{ico} {label}: {pretty}{ch_str}")
+                if not lines:
+                    lines.append("(no sensor values in response)")
+                pl_raw = r.get("path_len")
+                hops_str = _fmt_hops(pl_raw) if pl_raw is not None else ""
+                header = f"📡 telemetry {target}" + (f"  [{hops_str}]" if hops_str else "")
+                body = header + "\n" + "\n".join(lines)
+                return CommandResult(body)
+
+            if cmd == "autolog":
+                watches = self.bridge.get_telem_watches()
+                if not rest:
+                    if not watches:
+                        return CommandResult("autolog: (empty) — add with `!mesh autolog add <name>`")
+                    return CommandResult("autolog targets:\n" + "\n".join(f"  • {t}" for t in watches))
+                sub = rest[0].lower()
+                if sub in ("add", "a", "+") and len(rest) >= 2:
+                    target = " ".join(rest[1:])
+                    if target in watches:
+                        return CommandResult(f"autolog: {target} already watched")
+                    watches.append(target)
+                    self.bridge.set_telem_watches(watches)
+                    # kick off an immediate poll so the user gets a first data point
+                    import asyncio as _asyncio
+                    _asyncio.create_task(self.bridge.poll_telemetry_once(target))
+                    return CommandResult(
+                        f"✓ autolog added: {target} "
+                        f"(first poll running, regular interval applies afterwards)"
+                    )
+                if sub in ("remove", "rm", "del", "-") and len(rest) >= 2:
+                    target = " ".join(rest[1:])
+                    if target not in watches:
+                        return CommandResult(f"autolog: {target} not watched")
+                    watches = [t for t in watches if t != target]
+                    self.bridge.set_telem_watches(watches)
+                    return CommandResult(f"✓ autolog removed: {target}")
+                return CommandResult(
+                    "usage: !mesh autolog [add <name> | remove <name>]"
+                )
+
+            if cmd == "chart":
+                if not rest:
+                    return CommandResult("usage: !mesh chart <name> [hours]")
+                target = rest[0]
+                hours = 24.0
+                if len(rest) >= 2:
+                    try:
+                        hours = float(rest[1])
+                    except ValueError:
+                        return CommandResult("hours must be a number (e.g. 24, 48, 0.5)")
+                hours = max(0.1, min(hours, 720.0))
+                import time as _time
+                since = _time.time() - hours * 3600
+                rows = self.bridge.telemetrylog.query(target=target, since=since)
+                if not rows:
+                    # fallback: no data for this target/window — maybe user passed pubkey prefix
+                    # try generic contains on target name
+                    rows = [
+                        r for r in self.bridge.telemetrylog.query(since=since)
+                        if target.lower() in str(r.get("target") or "").lower()
+                    ]
+                if not rows:
+                    avail = self.bridge.telemetrylog.targets()
+                    hint = ("known targets: " + ", ".join(avail)) if avail else \
+                           "no telemetry logged yet — try `!mesh autolog add <name>` first"
+                    return CommandResult(
+                        f"no data for '{target}' in the last {hours:g} h.\n{hint}"
+                    )
+                try:
+                    from .chart import render_chart
+                    png, w, h = render_chart(rows, target=target, hours=hours)
+                except ImportError:
+                    return CommandResult(
+                        "chart dependencies missing — install matplotlib in the bridge venv "
+                        "(`pip install matplotlib`) and restart the service."
+                    )
+                except Exception as exc:
+                    log.exception("chart render failed")
+                    return CommandResult(f"chart render failed: {exc!r}")
+                # upload + post to whoever issued the command
+                target_room = source_room or self.bridge.control_room()
+                if not target_room:
+                    return CommandResult("no room to post the chart to")
+                caption = f"{target} — last {hours:g} h ({len(rows)} samples)"
+                try:
+                    await self.bridge.matrix.send_image(
+                        target_room,
+                        png,
+                        filename=f"mesh-telem-{target.replace(' ', '_')}-{int(hours)}h.png",
+                        mime_type="image/png",
+                        width=w, height=h,
+                        caption=caption,
+                    )
+                except Exception as exc:
+                    log.exception("chart upload failed")
+                    return CommandResult(f"chart upload failed: {exc!r}")
+                # Suppress further text; the image IS the reply
+                return CommandResult("", target_room=target_room)
 
             if cmd == "send":
                 if len(rest) < 2 or not rest[0].lstrip("-").isdigit():

@@ -30,6 +30,7 @@ from .droplog import DropLog
 from .matrixbot import MatrixBot
 from .meshnode import MeshNode
 from .state import State
+from .telemetrylog import TelemetryLog
 from .textsplit import split_for_radio
 
 from collections import deque
@@ -79,6 +80,10 @@ class Bridge:
         # Persistent append-only log of silently dropped messages.
         droplog_path = cfg.state_path.parent / "rx-drops.jsonl"
         self.droplog = DropLog(droplog_path)
+        # Persistent telemetry log (for charts)
+        telem_path = cfg.state_path.parent / "telemetry.jsonl"
+        self.telemetrylog = TelemetryLog(telem_path)
+        self._telem_task: asyncio.Task | None = None
 
     # ===== persistent state accessors ================================
 
@@ -327,7 +332,7 @@ class Bridge:
             res = await self.handler.dispatch(body, source_room=room_id)
             if res.html:
                 await self.matrix.send_html(room_id, res.plain, res.html, notice=True)
-            else:
+            elif res.plain:
                 await self.matrix.send(room_id, res.plain, notice=True)
             return
 
@@ -347,6 +352,73 @@ class Bridge:
             await self.matrix.send(
                 room_id, f"✗ mesh TX failed on #{idx}: {r.get('error')}", notice=True
             )
+
+    # ===== telemetry autolog =========================================
+
+    def get_telem_watches(self) -> list[str]:
+        return list(self.state.get("telem_watch", []) or [])
+
+    def set_telem_watches(self, targets: list[str]) -> None:
+        # dedupe, keep order
+        seen = set()
+        out: list[str] = []
+        for t in targets:
+            t = t.strip()
+            if not t or t in seen:
+                continue
+            seen.add(t)
+            out.append(t)
+        self.state.set("telem_watch", out)
+
+    async def poll_telemetry_once(self, target: str) -> dict[str, Any]:
+        """Fetch and log one telemetry sample for a single target."""
+        r = await self.node.telemetry(target)
+        if not r.get("ok"):
+            return r
+        sensors = r.get("sensors") or []
+        # try to resolve pubkey prefix via contact cache
+        pk = None
+        try:
+            c = self.node.mc.get_contact_by_name(target) if self.node.mc else None  # type: ignore[union-attr]
+            if c is None and self.node.mc:
+                c = self.node.mc.get_contact_by_key_prefix(target)
+            if c is not None:
+                pk = (getattr(c, "public_key", None) or
+                      (c.get("public_key") if isinstance(c, dict) else None))
+                if isinstance(pk, (bytes, bytearray)):
+                    pk = pk.hex()
+                if pk:
+                    pk = str(pk)[:12]
+        except Exception:
+            pass
+        self.telemetrylog.append(
+            target=target,
+            sensors=sensors,
+            path_len=r.get("path_len"),
+            pubkey_prefix=pk,
+        )
+        return r
+
+    async def _telemetry_autolog_loop(self) -> None:
+        interval = max(60, int(os.environ.get("TELEMETRY_INTERVAL_S", "900")))
+        self.log.info("telemetry autolog: interval=%ds", interval)
+        # small warmup so node/contacts settle
+        await asyncio.sleep(30)
+        while True:
+            targets = self.get_telem_watches()
+            if targets:
+                for t in targets:
+                    try:
+                        r = await self.poll_telemetry_once(t)
+                        if not r.get("ok"):
+                            self.log.debug("autolog %s: %s", t, r.get("error"))
+                    except Exception:
+                        self.log.exception("autolog poll for %s failed", t)
+                    await asyncio.sleep(5)  # spread load on the node
+            try:
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                return
 
     # ===== main ======================================================
 
@@ -377,6 +449,9 @@ class Bridge:
             await self.node.start_auto_fetch()
 
         matrix_task = asyncio.create_task(self.matrix.start(), name="matrix-sync")
+        self._telem_task = asyncio.create_task(
+            self._telemetry_autolog_loop(), name="telemetry-autolog"
+        )
         await asyncio.sleep(3)  # let initial sync run
         try:
             ctrl = await self.ensure_control_room()
@@ -400,6 +475,8 @@ class Bridge:
 
         self.log.info("Shutting down")
         matrix_task.cancel()
+        if self._telem_task:
+            self._telem_task.cancel()
         await self.node.disconnect()
         await self.matrix.close()
         return 0

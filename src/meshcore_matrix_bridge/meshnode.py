@@ -288,6 +288,16 @@ class MeshNode:
         if contact is None:
             contact = self.mc.get_contact_by_key_prefix(target)
         if contact is None:
+            # Contact cache may be empty or stale (lib only populates it on
+            # explicit get_contacts). Refresh once and retry before giving up.
+            try:
+                await self.mc.commands.get_contacts()
+            except Exception:
+                pass
+            contact = self.mc.get_contact_by_name(target)
+            if contact is None:
+                contact = self.mc.get_contact_by_key_prefix(target)
+        if contact is None:
             return {"ok": False, "error": f"contact '{target}' not found"}
         r = await self.mc.commands.send_msg_with_retry(
             contact, text, max_attempts=3, max_flood_attempts=2, flood_after=2,
@@ -295,6 +305,45 @@ class MeshNode:
         if r is None:
             return {"ok": False, "error": "no ACK"}
         return {"ok": True, "info": r.payload if hasattr(r, "payload") else None}
+
+    async def telemetry(self, target: str) -> dict[str, Any]:
+        """Request LPP telemetry from a contact (repeater/room-server/companion).
+
+        target: adv_name OR hex public-key prefix.
+        Returns {ok, sensors: [{channel,type,value}, ...], path_len, raw} on success.
+        """
+        assert self.mc is not None
+        contact = self.mc.get_contact_by_name(target)
+        if contact is None:
+            contact = self.mc.get_contact_by_key_prefix(target)
+        if contact is None:
+            try:
+                await self.mc.commands.get_contacts()
+            except Exception:
+                pass
+            contact = self.mc.get_contact_by_name(target)
+            if contact is None:
+                contact = self.mc.get_contact_by_key_prefix(target)
+        if contact is None:
+            return {"ok": False, "error": f"contact '{target}' not found"}
+        try:
+            r = await self.mc.commands.req_telemetry_sync(contact)
+        except Exception as exc:
+            return {"ok": False, "error": f"req_telemetry_sync raised: {exc!r}"}
+        if r is None:
+            return {"ok": False, "error": "no ACK / no telemetry response"}
+        # req_telemetry_sync returns the lpp list directly (see meshcore/reader.py)
+        sensors: list[dict[str, Any]] = []
+        if isinstance(r, list):
+            sensors = r
+        elif isinstance(r, dict):
+            lpp = r.get("lpp") or r.get("sensors") or r.get("telemetry")
+            if isinstance(lpp, list):
+                sensors = lpp
+        path_len = getattr(contact, "out_path_len", None)
+        if path_len is None and isinstance(contact, dict):
+            path_len = contact.get("out_path_len")
+        return {"ok": True, "sensors": sensors, "path_len": path_len, "raw": r}
 
     async def send_channel(self, channel_idx: int, text: str) -> dict[str, Any]:
         assert self.mc is not None

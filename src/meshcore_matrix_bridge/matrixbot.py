@@ -171,6 +171,43 @@ class MatrixBot:
             room_id=room_id, message_type="m.room.message", content=content, ignore_unverified_devices=True,
         )
 
+    async def send_image(
+        self,
+        room_id: str,
+        data: bytes,
+        filename: str,
+        mime_type: str = "image/png",
+        width: int | None = None,
+        height: int | None = None,
+        caption: str | None = None,
+    ) -> None:
+        """Upload an in-memory image and post it as an m.image event."""
+        from io import BytesIO
+        buf = BytesIO(data)
+        resp, _ = await self.client.upload(
+            lambda *_: buf,
+            content_type=mime_type,
+            filename=filename,
+            filesize=len(data),
+        )
+        mxc = getattr(resp, "content_uri", None)
+        if not mxc:
+            raise RuntimeError(f"upload failed: {resp!r}")
+        info: dict[str, Any] = {"mimetype": mime_type, "size": len(data)}
+        if width:
+            info["w"] = width
+        if height:
+            info["h"] = height
+        content = {
+            "msgtype": "m.image",
+            "body": caption or filename,
+            "url": mxc,
+            "info": info,
+        }
+        await self.client.room_send(
+            room_id=room_id, message_type="m.room.message", content=content, ignore_unverified_devices=True,
+        )
+
     # ----- callbacks ----------------------------------------------------
 
     async def _on_invite(self, room: MatrixRoom, event: InviteMemberEvent) -> None:
