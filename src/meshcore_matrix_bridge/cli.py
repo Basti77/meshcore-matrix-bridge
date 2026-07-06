@@ -59,14 +59,14 @@ async def _run(a: argparse.Namespace) -> int:
     await node.connect()
     try:
         if a.cmd == "contacts":
-            out = await node.list_contacts()
-            _emit(a, out, lambda: _fmt_contacts(out))
+            contacts = await node.list_contacts()
+            _emit(a, contacts, lambda: _fmt_contacts(contacts))
         elif a.cmd == "channels":
-            out = await node.list_channels()
-            _emit(a, out, lambda: _fmt_channels(out))
+            channels = await node.list_channels()
+            _emit(a, channels, lambda: _fmt_channels(channels))
         elif a.cmd == "status":
-            out = await node.self_info()
-            _emit(a, out, lambda: _fmt_kv(out))
+            info = await node.self_info()
+            _emit(a, info, lambda: _fmt_kv(info))
         elif a.cmd in ("fetch", "public"):
             batch = await node.fetch_backlog(limit=a.limit)
             if a.cmd == "public":
@@ -74,7 +74,7 @@ async def _run(a: argparse.Namespace) -> int:
                 public_idx = 0
                 for ch in chans:
                     if (ch.get("channel_name") or "").lstrip("#").lower() == "public":
-                        public_idx = ch.get("channel_idx")
+                        public_idx = int(ch.get("channel_idx") or 0)
                         break
                 batch = [
                     (k, p) for (k, p) in batch

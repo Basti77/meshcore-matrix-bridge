@@ -182,7 +182,12 @@ class CommandHandler:
     async def dispatch(self, body: str, source_room: str | None = None) -> CommandResult:
         # take first non-empty line only
         first_line = next((ln for ln in body.splitlines() if ln.strip()), "").strip()
-        parts = shlex.split(first_line)
+        try:
+            parts = shlex.split(first_line)
+        except ValueError:
+            # Unbalanced quote/apostrophe ("don't panic") — degrade to a plain
+            # whitespace split instead of failing the whole command.
+            parts = first_line.split()
         if not parts or parts[0] != self.prefix:
             return CommandResult("(not a mesh command)")
         args = parts[1:]
@@ -306,7 +311,6 @@ class CommandHandler:
                 snap = self.bridge.rx_snapshot()
                 chans = snap["channels"]
                 dm = snap["dm"]
-                dm_samples = snap["dm_samples"]
 
                 # detail view for a specific channel
                 if rest and rest[0].lstrip("-").isdigit():
@@ -433,13 +437,13 @@ class CommandHandler:
                     "luminosity": ("☀️", "lx"),
                     "gps": ("📍", ""),
                 }
-                lines: list[str] = []
+                sensor_lines: list[str] = []
                 for s in sensors:
                     if not isinstance(s, dict):
                         continue
                     typ = str(s.get("type") or "").lower()
                     val = s.get("value")
-                    ch = s.get("channel")
+                    chan_no = s.get("channel")
                     ico, unit = LABEL.get(typ, ("·", ""))
                     if typ == "voltage" and isinstance(val, (int, float)):
                         pretty = f"{val:.2f} {unit}"
@@ -450,14 +454,14 @@ class CommandHandler:
                     else:
                         pretty = f"{val} {unit}".rstrip()
                     label = s.get("type") or "?"
-                    ch_str = f" (ch{ch})" if ch not in (None, 1) else ""
-                    lines.append(f"{ico} {label}: {pretty}{ch_str}")
-                if not lines:
-                    lines.append("(no sensor values in response)")
+                    ch_str = f" (ch{chan_no})" if chan_no not in (None, 1) else ""
+                    sensor_lines.append(f"{ico} {label}: {pretty}{ch_str}")
+                if not sensor_lines:
+                    sensor_lines.append("(no sensor values in response)")
                 pl_raw = r.get("path_len")
                 hops_str = _fmt_hops(pl_raw) if pl_raw is not None else ""
                 header = f"📡 telemetry {target}" + (f"  [{hops_str}]" if hops_str else "")
-                body = header + "\n" + "\n".join(lines)
+                body = header + "\n" + "\n".join(sensor_lines)
                 return CommandResult(body)
 
             if cmd == "autolog":
@@ -521,7 +525,7 @@ class CommandHandler:
                     )
                 try:
                     from .chart import render_chart
-                    png, w, h = render_chart(rows, target=target, hours=hours)
+                    png, img_w, img_h = render_chart(rows, target=target, hours=hours)
                 except ImportError:
                     return CommandResult(
                         "chart dependencies missing — install matplotlib in the bridge venv "
@@ -541,7 +545,7 @@ class CommandHandler:
                         png,
                         filename=f"mesh-telem-{target.replace(' ', '_')}-{int(hours)}h.png",
                         mime_type="image/png",
-                        width=w, height=h,
+                        width=img_w, height=img_h,
                         caption=caption,
                     )
                 except Exception as exc:
@@ -561,6 +565,6 @@ class CommandHandler:
                 return CommandResult(f"✗ send to #{idx} failed: {r.get('error')}")
 
             return CommandResult(f"unknown subcommand: {cmd}\n\n" + HELP.format(prefix=self.prefix))
-        except Exception as exc:  # pragma: no cover
+        except Exception as exc:
             log.exception("Command %s failed", cmd)
             return CommandResult(f"internal error: {exc!r}")

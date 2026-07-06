@@ -8,13 +8,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable
 
 from nio import (  # type: ignore[import-not-found]
     AsyncClient,
     AsyncClientConfig,
     InviteMemberEvent,
-    LoginResponse,
     RoomMessageText,
     MatrixRoom,
     RoomPreset,

@@ -12,5 +12,5 @@ venv/
 .ruff_cache/
 .mypy_cache/
 state.json
-/home/klempi/.local/
 .vscode/
+.pytest_cache/

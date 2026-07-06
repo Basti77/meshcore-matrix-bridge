@@ -6,7 +6,7 @@ validates them into a frozen dataclass. No secrets are hardcoded.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
@@ -52,8 +52,6 @@ class BridgeConfig:
     # --- Bridge behaviour ---
     command_prefix: str           # default "!mesh"
     auto_fetch_messages: bool     # start auto-fetch on connect
-    relay_channel_messages: bool  # forward channel RX to Matrix by default
-    relay_channel_indexes: tuple[int, ...]  # which channels to relay (empty = none)
     state_path: Path              # JSON file for persistent state (room-id, last-fetch, etc.)
 
     @classmethod
@@ -67,11 +65,6 @@ class BridgeConfig:
         allowed = tuple(
             u.strip() for u in os.environ.get("MATRIX_ALLOWED_USERS", "").split(",") if u.strip()
         )
-        relay_idx_raw = os.environ.get("MESH_RELAY_CHANNEL_INDEXES", "").strip()
-        relay_idx: tuple[int, ...] = tuple(
-            int(x) for x in relay_idx_raw.split(",") if x.strip().lstrip("-").isdigit()
-        ) if relay_idx_raw else ()
-
         return cls(
             matrix_homeserver=req("MATRIX_HOMESERVER").rstrip("/"),
             matrix_user_id=req("MATRIX_USER_ID"),
@@ -86,7 +79,5 @@ class BridgeConfig:
             meshcore_auto_reconnect=os.environ.get("MESHCORE_AUTO_RECONNECT", "1") == "1",
             command_prefix=os.environ.get("MESH_COMMAND_PREFIX", "!mesh"),
             auto_fetch_messages=os.environ.get("MESH_AUTO_FETCH", "1") == "1",
-            relay_channel_messages=os.environ.get("MESH_RELAY_CHANNELS", "0") == "1",
-            relay_channel_indexes=relay_idx,
             state_path=Path(os.environ.get("MESH_STATE_PATH", str(Path.home() / ".local/state/meshcore-matrix-bridge/state.json"))),
         )

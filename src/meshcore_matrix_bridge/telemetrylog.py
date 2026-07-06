@@ -13,7 +13,7 @@ import os
 import time
 from pathlib import Path
 from threading import Lock
-from typing import Any, Iterable
+from typing import Any
 
 
 log = logging.getLogger(__name__)

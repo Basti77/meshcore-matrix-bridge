@@ -22,7 +22,7 @@ import re
 import signal
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from .commands import CommandHandler, fmt_msg
 from .config import BridgeConfig, load_env_files
@@ -33,7 +33,6 @@ from .state import State
 from .telemetrylog import TelemetryLog
 from .textsplit import split_for_radio
 
-from collections import deque
 
 
 _ALIAS_RE = re.compile(r"[^a-z0-9_\-]+")
@@ -448,10 +447,30 @@ class Bridge:
         if self.cfg.auto_fetch_messages:
             await self.node.start_auto_fetch()
 
+        stop = asyncio.Event()
+        exit_code = 0
+
         matrix_task = asyncio.create_task(self.matrix.start(), name="matrix-sync")
         self._telem_task = asyncio.create_task(
             self._telemetry_autolog_loop(), name="telemetry-autolog"
         )
+
+        def _sync_done(task: asyncio.Task) -> None:
+            # The sync loop must never end on its own. If it does (expired
+            # token, network gone for good, bug), exit non-zero so systemd
+            # restarts us instead of leaving a zombie bridge behind.
+            nonlocal exit_code
+            if task.cancelled():
+                return
+            exc = task.exception()
+            if exc is not None:
+                self.log.error("matrix sync task died: %r — exiting for restart", exc)
+            else:
+                self.log.error("matrix sync task ended unexpectedly — exiting for restart")
+            exit_code = 1
+            stop.set()
+
+        matrix_task.add_done_callback(_sync_done)
         await asyncio.sleep(3)  # let initial sync run
         try:
             ctrl = await self.ensure_control_room()
@@ -464,7 +483,6 @@ class Bridge:
         except Exception:
             self.log.exception("Failed to ensure control room")
 
-        stop = asyncio.Event()
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
@@ -474,21 +492,28 @@ class Bridge:
         await stop.wait()
 
         self.log.info("Shutting down")
-        matrix_task.cancel()
-        if self._telem_task:
-            self._telem_task.cancel()
+        for task in (matrix_task, self._telem_task):
+            if task is None or task.done():
+                continue
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                self.log.debug("task %s raised during shutdown", task.get_name(), exc_info=True)
         await self.node.disconnect()
         await self.matrix.close()
-        return 0
+        return exit_code
 
 
 def main() -> int:
     _setup_logging()
+    secrets_dir = Path.home() / ".meshcore-bridge-secrets"
     env_paths = [
         Path(p) for p in os.environ.get(
             "MESH_BRIDGE_ENV_FILES",
-            "/home/klempi/.meshcore-bridge-secrets/matrix.env:"
-            "/home/klempi/.meshcore-bridge-secrets/bridge.env",
+            f"{secrets_dir / 'matrix.env'}:{secrets_dir / 'bridge.env'}",
         ).split(":") if p.strip()
     ]
     load_env_files(env_paths)

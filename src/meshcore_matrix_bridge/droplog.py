@@ -26,7 +26,7 @@ import time
 from collections import deque
 from pathlib import Path
 from threading import RLock
-from typing import Any, Iterable
+from typing import Any
 
 
 log = logging.getLogger(__name__)
